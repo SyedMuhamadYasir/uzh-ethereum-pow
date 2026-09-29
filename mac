@@ -1,3 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exec bash <(curl -fsSL --retry 3 https://raw.githubusercontent.com/SyedMuhamadYasir/uzh-ethereum-pow/main/install-macos.sh)
+
+if ! command -v brew >/dev/null 2>&1; then
+  echo "ERROR: Homebrew is required. Install Homebrew first, then run this command again." >&2
+  exit 1
+fi
+
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "Installing tmux..."
+  brew install tmux
+fi
+
+ARCH="$(uname -m)"
+
+case "$ARCH" in
+  arm64)
+    URL="https://github.com/SyedMuhamadYasir/uzh-ethereum-pow/releases/download/bce26-v1.10.26/uzh-geth-macos-arm64-v1.10.26"
+    ;;
+  x86_64)
+    URL="https://github.com/SyedMuhamadYasir/uzh-ethereum-pow/releases/download/bce26-v1.10.26/uzh-geth-macos-amd64-v1.10.26"
+    ;;
+  *)
+    echo "ERROR: Unsupported Mac architecture: $ARCH" >&2
+    exit 1
+    ;;
+esac
+
+DEST="$(brew --prefix)/bin/uzh-geth"
+TMP="$(mktemp -t uzh-geth.XXXXXX)"
+trap 'rm -f "$TMP"' EXIT
+
+echo "Detected macOS architecture: $ARCH"
+echo "Downloading UZH Ethereum PoW client..."
+
+curl -fL --retry 3 --retry-delay 1 "$URL" -o "$TMP"
+chmod 755 "$TMP"
+mv -f "$TMP" "$DEST"
+trap - EXIT
+
+echo
+echo "Installed: $DEST"
+echo
+"$DEST" version
