@@ -1,0 +1,143 @@
+name: Build macOS UZH Geth
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        required: true
+        default: bce26-v1.10.26
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            asset_arch: arm64
+            uname_arch: arm64
+          - runner: macos-15-intel
+            asset_arch: amd64
+            uname_arch: x86_64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Show runner architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          test "$(uname -m)" = "${{ matrix.uname_arch }}"
+
+      - name: Install Go 1.24.13
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.13'
+          check-latest: false
+
+      - name: Fetch Go-Ethereum v1.10.26
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v1.10.26 https://github.com/ethereum/go-ethereum.git src
+          cd src
+          git rev-parse HEAD
+          test "$(git rev-parse HEAD)" = "e5eb32acee19cc9fca6a03b10283b7484246b15a"
+
+      - name: Apply Go 1.24 linker compatibility patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/build/ci.go")
+          s = p.read_text()
+          old = 'ld = append(ld, "-s")'
+          new = 'ld = append(ld, "-s", "-checklinkname=0")'
+          if old not in s:
+              raise SystemExit("Expected linker line not found")
+          p.write_text(s.replace(old, new, 1))
+          PY
+          grep -n -- '-checklinkname=0' src/build/ci.go
+
+      - name: Build geth only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src
+          make geth
+
+      - name: Validate and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ASSET="uzh-geth-macos-${{ matrix.asset_arch }}-v1.10.26"
+          cp src/build/bin/geth "dist/$ASSET"
+          chmod 755 "dist/$ASSET"
+
+          echo "=== FILE ==="
+          file "dist/$ASSET"
+
+          echo "=== VERSION ==="
+          "dist/$ASSET" version
+
+          echo "=== DYLIBS ==="
+          otool -L "dist/$ASSET"
+
+          if otool -L "dist/$ASSET" | tail -n +2 | grep -Eq '/opt/homebrew|/usr/local'; then
+            echo "Unexpected Homebrew runtime dependency detected"
+            exit 1
+          fi
+
+          cd dist
+          shasum -a 256 "$ASSET" > "$ASSET.sha256"
+          cat "$ASSET.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.asset_arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download both architectures
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macos-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lah dist
+          cd dist
+          shasum -a 256 -c *.sha256
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; updating assets."
+          else
+            gh release create "$TAG"               --repo "${{ github.repository }}"               --target main               --title "BCE 2026 — UZH Ethereum PoW macOS client"               --notes "Prebuilt Go-Ethereum v1.10.26 course binaries for macOS Apple Silicon (arm64) and Intel (amd64). SHA-256 checksum files are included."
+          fi
+
+          gh release upload "$TAG" dist/*             --repo "${{ github.repository }}"             --clobber
